@@ -22,7 +22,6 @@ pub mod crypto;
 pub mod header;
 pub mod packet;
 pub mod payload;
-pub mod payload_format;
 pub mod route;
 pub mod surb;
 mod utils;
@@ -38,5 +37,4 @@ pub use crate::error::{Error, ErrorKind, Result};
 pub use crate::packet::{
     builder::SphinxPacketBuilder, ProcessedPacket, ProcessedPacketData, SphinxPacket,
 };
-pub use crate::payload_format::{ForwardPayload, PacketType, ReplyPayload};
 pub use crate::surb::{SURBMaterial, SURB};
