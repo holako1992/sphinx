@@ -33,20 +33,29 @@ impl PacketType {
 }
 
 /// Forward packet payload format:
-/// [1 byte: type=0x01][2 bytes: dest_len][dest][2 bytes: surb_len][surb][data]
+/// [1 byte: type=0x01][2 bytes: dest_len][dest][2 bytes: surb_count][surb1_len: 2][surb1]...[data]
 #[derive(Debug, Clone)]
 pub struct ForwardPayload {
     pub destination: String,
-    pub surb_bytes: Vec<u8>,
+    pub surbs: Vec<Vec<u8>>,  // Multiple SURBs for potential reply fragments
     pub data: Vec<u8>,
 }
 
 impl ForwardPayload {
-    /// Create a new forward payload
+    /// Create a new forward payload with a single SURB
     pub fn new(destination: String, surb_bytes: Vec<u8>, data: Vec<u8>) -> Self {
         Self {
             destination,
-            surb_bytes,
+            surbs: vec![surb_bytes],
+            data,
+        }
+    }
+
+    /// Create a new forward payload with multiple SURBs
+    pub fn new_with_surbs(destination: String, surbs: Vec<Vec<u8>>, data: Vec<u8>) -> Self {
+        Self {
+            destination,
+            surbs,
             data,
         }
     }
@@ -55,14 +64,21 @@ impl ForwardPayload {
     pub fn to_bytes(&self) -> Vec<u8> {
         let dest_bytes = self.destination.as_bytes();
         let dest_len = (dest_bytes.len() as u16).to_be_bytes();
-        let surb_len = (self.surb_bytes.len() as u16).to_be_bytes();
+        let surb_count = (self.surbs.len() as u16).to_be_bytes();
 
         let mut bytes = Vec::new();
         bytes.push(PacketType::Forward.to_byte()); // Type field
         bytes.extend_from_slice(&dest_len);        // Destination length
         bytes.extend_from_slice(dest_bytes);       // Destination
-        bytes.extend_from_slice(&surb_len);        // SURB length
-        bytes.extend_from_slice(&self.surb_bytes); // SURB
+        bytes.extend_from_slice(&surb_count);      // Number of SURBs
+        
+        // Serialize each SURB with its length
+        for surb in &self.surbs {
+            let surb_len = (surb.len() as u16).to_be_bytes();
+            bytes.extend_from_slice(&surb_len);
+            bytes.extend_from_slice(surb);
+        }
+        
         bytes.extend_from_slice(&self.data);       // Data
         bytes
     }
@@ -108,32 +124,47 @@ impl ForwardPayload {
             .map_err(|e| Error::new(ErrorKind::InvalidPayload, format!("Invalid UTF-8 in destination: {}", e)))?;
         offset += dest_len;
 
-        // Parse SURB length
+        // Parse SURB count
         if bytes.len() < offset + 2 {
             return Err(Error::new(
                 ErrorKind::InvalidPayload,
-                "Payload too short for SURB length",
+                "Payload too short for SURB count",
             ));
         }
-        let surb_len = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]) as usize;
+        let surb_count = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]) as usize;
         offset += 2;
 
-        // Parse SURB
-        if bytes.len() < offset + surb_len {
-            return Err(Error::new(
-                ErrorKind::InvalidPayload,
-                "Payload too short for SURB",
-            ));
+        // Parse each SURB
+        let mut surbs = Vec::new();
+        for _ in 0..surb_count {
+            // Parse SURB length
+            if bytes.len() < offset + 2 {
+                return Err(Error::new(
+                    ErrorKind::InvalidPayload,
+                    "Payload too short for SURB length",
+                ));
+            }
+            let surb_len = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]) as usize;
+            offset += 2;
+
+            // Parse SURB
+            if bytes.len() < offset + surb_len {
+                return Err(Error::new(
+                    ErrorKind::InvalidPayload,
+                    "Payload too short for SURB",
+                ));
+            }
+            let surb_bytes = bytes[offset..offset + surb_len].to_vec();
+            offset += surb_len;
+            surbs.push(surb_bytes);
         }
-        let surb_bytes = bytes[offset..offset + surb_len].to_vec();
-        offset += surb_len;
 
         // Remaining bytes are data
         let data = bytes[offset..].to_vec();
 
         Ok(Self {
             destination,
-            surb_bytes,
+            surbs,
             data,
         })
     }
@@ -201,7 +232,27 @@ mod tests {
         let parsed = ForwardPayload::from_bytes(&bytes).unwrap();
 
         assert_eq!(parsed.destination, original.destination);
-        assert_eq!(parsed.surb_bytes, original.surb_bytes);
+        assert_eq!(parsed.surbs.len(), 1);
+        assert_eq!(parsed.surbs[0], vec![1, 2, 3, 4]);
+        assert_eq!(parsed.data, original.data);
+    }
+
+    #[test]
+    fn test_forward_payload_multiple_surbs() {
+        let original = ForwardPayload::new_with_surbs(
+            "example.com:80".to_string(),
+            vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8, 9]],
+            vec![10, 11, 12],
+        );
+
+        let bytes = original.to_bytes();
+        let parsed = ForwardPayload::from_bytes(&bytes).unwrap();
+
+        assert_eq!(parsed.destination, original.destination);
+        assert_eq!(parsed.surbs.len(), 3);
+        assert_eq!(parsed.surbs[0], vec![1, 2, 3]);
+        assert_eq!(parsed.surbs[1], vec![4, 5, 6]);
+        assert_eq!(parsed.surbs[2], vec![7, 8, 9]);
         assert_eq!(parsed.data, original.data);
     }
 
