@@ -33,9 +33,10 @@ impl PacketType {
 }
 
 /// Forward packet payload format:
-/// [1 byte: type=0x01][2 bytes: dest_len][dest][2 bytes: surb_count][surb1_len: 2][surb1]...[data]
+/// [1 byte: type=0x01][2 bytes: sender_tag_len][sender_tag][2 bytes: dest_len][dest][2 bytes: surb_count][surb1_len: 2][surb1]...[data]
 #[derive(Debug, Clone)]
 pub struct ForwardPayload {
+    pub sender_tag: Vec<u8>,  // Random tag identifying the sender (not revealing identity)
     pub destination: String,
     pub surbs: Vec<Vec<u8>>,  // Multiple SURBs for potential reply fragments
     pub data: Vec<u8>,
@@ -43,8 +44,9 @@ pub struct ForwardPayload {
 
 impl ForwardPayload {
     /// Create a new forward payload with a single SURB
-    pub fn new(destination: String, surb_bytes: Vec<u8>, data: Vec<u8>) -> Self {
+    pub fn new(sender_tag: Vec<u8>, destination: String, surb_bytes: Vec<u8>, data: Vec<u8>) -> Self {
         Self {
+            sender_tag,
             destination,
             surbs: vec![surb_bytes],
             data,
@@ -52,8 +54,9 @@ impl ForwardPayload {
     }
 
     /// Create a new forward payload with multiple SURBs
-    pub fn new_with_surbs(destination: String, surbs: Vec<Vec<u8>>, data: Vec<u8>) -> Self {
+    pub fn new_with_surbs(sender_tag: Vec<u8>, destination: String, surbs: Vec<Vec<u8>>, data: Vec<u8>) -> Self {
         Self {
+            sender_tag,
             destination,
             surbs,
             data,
@@ -62,12 +65,15 @@ impl ForwardPayload {
 
     /// Serialize to bytes with strict format
     pub fn to_bytes(&self) -> Vec<u8> {
+        let sender_tag_len = (self.sender_tag.len() as u16).to_be_bytes();
         let dest_bytes = self.destination.as_bytes();
         let dest_len = (dest_bytes.len() as u16).to_be_bytes();
         let surb_count = (self.surbs.len() as u16).to_be_bytes();
 
         let mut bytes = Vec::new();
         bytes.push(PacketType::Forward.to_byte()); // Type field
+        bytes.extend_from_slice(&sender_tag_len);  // Sender tag length
+        bytes.extend_from_slice(&self.sender_tag); // Sender tag
         bytes.extend_from_slice(&dest_len);        // Destination length
         bytes.extend_from_slice(dest_bytes);       // Destination
         bytes.extend_from_slice(&surb_count);      // Number of SURBs
@@ -102,6 +108,26 @@ impl ForwardPayload {
         }
 
         let mut offset = 1;
+
+        // Parse sender tag length
+        if bytes.len() < offset + 2 {
+            return Err(Error::new(
+                ErrorKind::InvalidPayload,
+                "Payload too short for sender tag length",
+            ));
+        }
+        let sender_tag_len = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]) as usize;
+        offset += 2;
+
+        // Parse sender tag
+        if bytes.len() < offset + sender_tag_len {
+            return Err(Error::new(
+                ErrorKind::InvalidPayload,
+                "Payload too short for sender tag",
+            ));
+        }
+        let sender_tag = bytes[offset..offset + sender_tag_len].to_vec();
+        offset += sender_tag_len;
 
         // Parse destination length
         if bytes.len() < offset + 2 {
@@ -163,6 +189,7 @@ impl ForwardPayload {
         let data = bytes[offset..].to_vec();
 
         Ok(Self {
+            sender_tag,
             destination,
             surbs,
             data,
