@@ -27,6 +27,10 @@ pub mod route;
 pub mod surb;
 mod utils;
 
+// Layer 3 networking support
+pub mod ip_packet;
+pub mod tun_device;
+
 // cleaned-up modules + imports here:
 pub mod error;
 

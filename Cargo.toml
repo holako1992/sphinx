@@ -33,7 +33,15 @@ byteorder = "1.5.0"
 subtle = "2.4.1"
 zeroize = "1.7.0"
 
+# Layer 3 networking
+tun = { version = "0.6", features = ["async"], optional = true }
+anyhow = "1.0"
+log = "0.4"
 
+
+[features]
+default = []
+tun-support = ["tun"]
 
 [dev-dependencies]
 criterion = "0.5.1"
