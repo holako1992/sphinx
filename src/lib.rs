@@ -38,5 +38,5 @@ pub use crate::error::{Error, ErrorKind, Result};
 pub use crate::packet::{
     builder::SphinxPacketBuilder, ProcessedPacket, ProcessedPacketData, SphinxPacket,
 };
-pub use crate::payload_format::{ForwardPayload, PacketType, ReplyPayload};
+pub use crate::payload_format::{AckPayload, ForwardPayload, PacketType, PingPayload, ReplyPayload};
 pub use crate::surb::{SURBMaterial, SURB};

@@ -13,6 +13,10 @@ pub enum PacketType {
     Forward = 0x01,
     /// SURB reply packet returning to client
     Reply = 0x02,
+    /// Health check ping packet
+    Ping = 0x03,
+    /// Health check acknowledgment
+    Ack = 0x04,
 }
 
 impl PacketType {
@@ -20,6 +24,8 @@ impl PacketType {
         match byte {
             0x01 => Ok(PacketType::Forward),
             0x02 => Ok(PacketType::Reply),
+            0x03 => Ok(PacketType::Ping),
+            0x04 => Ok(PacketType::Ack),
             _ => Err(Error::new(
                 ErrorKind::InvalidPayload,
                 format!("Invalid packet type: 0x{:02x}", byte),
@@ -240,6 +246,181 @@ impl ReplyPayload {
         let data = bytes[1..].to_vec();
 
         Ok(Self { data })
+    }
+}
+
+/// Ping packet payload format (health check):
+/// [1 byte: type=0x03][1 byte: hop_index][2 bytes: surb_count][surb1_len: 2][surb1]...
+#[derive(Debug, Clone)]
+pub struct PingPayload {
+    pub hop_index: u8,        // Current hop index (0 for first hop)
+    pub surbs: Vec<Vec<u8>>,  // SURBs for each hop to send ACK back
+}
+
+impl PingPayload {
+    /// Create a new ping payload
+    pub fn new(hop_index: u8, surbs: Vec<Vec<u8>>) -> Self {
+        Self { hop_index, surbs }
+    }
+
+    /// Serialize to bytes with strict format
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let surb_count = (self.surbs.len() as u16).to_be_bytes();
+
+        let mut bytes = Vec::new();
+        bytes.push(PacketType::Ping.to_byte()); // Type field
+        bytes.push(self.hop_index);              // Hop index
+        bytes.extend_from_slice(&surb_count);    // Number of SURBs
+        
+        // Serialize each SURB with its length
+        for surb in &self.surbs {
+            let surb_len = (surb.len() as u16).to_be_bytes();
+            bytes.extend_from_slice(&surb_len);
+            bytes.extend_from_slice(surb);
+        }
+        
+        bytes
+    }
+
+    /// Parse from bytes with strict format validation
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        if bytes.is_empty() {
+            return Err(Error::new(
+                ErrorKind::InvalidPayload,
+                "Empty payload",
+            ));
+        }
+
+        // Check packet type
+        let packet_type = PacketType::from_byte(bytes[0])?;
+        if packet_type != PacketType::Ping {
+            return Err(Error::new(
+                ErrorKind::InvalidPayload,
+                format!("Expected Ping packet type, got {:?}", packet_type),
+            ));
+        }
+
+        let mut offset = 1;
+
+        // Parse hop index
+        if bytes.len() < offset + 1 {
+            return Err(Error::new(
+                ErrorKind::InvalidPayload,
+                "Payload too short for hop index",
+            ));
+        }
+        let hop_index = bytes[offset];
+        offset += 1;
+
+        // Parse SURB count
+        if bytes.len() < offset + 2 {
+            return Err(Error::new(
+                ErrorKind::InvalidPayload,
+                "Payload too short for SURB count",
+            ));
+        }
+        let surb_count = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]) as usize;
+        offset += 2;
+
+        // Parse each SURB
+        let mut surbs = Vec::new();
+        for _ in 0..surb_count {
+            // Parse SURB length
+            if bytes.len() < offset + 2 {
+                return Err(Error::new(
+                    ErrorKind::InvalidPayload,
+                    "Payload too short for SURB length",
+                ));
+            }
+            let surb_len = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]) as usize;
+            offset += 2;
+
+            // Parse SURB
+            if bytes.len() < offset + surb_len {
+                return Err(Error::new(
+                    ErrorKind::InvalidPayload,
+                    "Payload too short for SURB",
+                ));
+            }
+            let surb_bytes = bytes[offset..offset + surb_len].to_vec();
+            offset += surb_len;
+            surbs.push(surb_bytes);
+        }
+
+        Ok(Self { hop_index, surbs })
+    }
+}
+
+/// Ack packet payload format (health check response):
+/// [1 byte: type=0x04][1 byte: hop_index][32 bytes: node_address][8 bytes: timestamp]
+#[derive(Debug, Clone)]
+pub struct AckPayload {
+    pub hop_index: u8,            // Which hop this ACK is from
+    pub node_address: [u8; 32],   // Sphinx address of the responding node
+    pub timestamp: u64,            // Unix timestamp in milliseconds
+}
+
+impl AckPayload {
+    /// Create a new ACK payload
+    pub fn new(hop_index: u8, node_address: [u8; 32], timestamp_millis: u64) -> Self {
+        Self {
+            hop_index,
+            node_address,
+            timestamp: timestamp_millis,
+        }
+    }
+
+    /// Serialize to bytes with strict format
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.push(PacketType::Ack.to_byte());       // Type field
+        bytes.push(self.hop_index);                   // Hop index
+        bytes.extend_from_slice(&self.node_address);  // Node address
+        bytes.extend_from_slice(&self.timestamp.to_be_bytes()); // Timestamp
+        bytes
+    }
+
+    /// Parse from bytes with strict format validation
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        if bytes.is_empty() {
+            return Err(Error::new(
+                ErrorKind::InvalidPayload,
+                "Empty payload",
+            ));
+        }
+
+        // Check packet type
+        let packet_type = PacketType::from_byte(bytes[0])?;
+        if packet_type != PacketType::Ack {
+            return Err(Error::new(
+                ErrorKind::InvalidPayload,
+                format!("Expected Ack packet type, got {:?}", packet_type),
+            ));
+        }
+
+        // Expected size: 1 (type) + 1 (hop) + 32 (address) + 8 (timestamp) = 42 bytes
+        if bytes.len() < 42 {
+            return Err(Error::new(
+                ErrorKind::InvalidPayload,
+                format!("Ack payload too short: {} bytes, expected at least 42", bytes.len()),
+            ));
+        }
+
+        let hop_index = bytes[1];
+        
+        let mut node_address = [0u8; 32];
+        node_address.copy_from_slice(&bytes[2..34]);
+        
+        let timestamp = u64::from_be_bytes([
+            bytes[34], bytes[35], bytes[36], bytes[37],
+            bytes[38], bytes[39], bytes[40], bytes[41],
+        ]);
+
+        Ok(Self {
+            hop_index,
+            node_address,
+            timestamp,
+        })
     }
 }
 
