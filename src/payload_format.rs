@@ -352,21 +352,19 @@ impl PingPayload {
 }
 
 /// Ack packet payload format (health check response):
-/// [1 byte: type=0x04][1 byte: hop_index][32 bytes: node_address][8 bytes: timestamp]
+/// [1 byte: type=0x04][1 byte: hop_index][32 bytes: node_address]
 #[derive(Debug, Clone)]
 pub struct AckPayload {
     pub hop_index: u8,            // Which hop this ACK is from
     pub node_address: [u8; 32],   // Sphinx address of the responding node
-    pub timestamp: u64,            // Unix timestamp in milliseconds
 }
 
 impl AckPayload {
     /// Create a new ACK payload
-    pub fn new(hop_index: u8, node_address: [u8; 32], timestamp_millis: u64) -> Self {
+    pub fn new(hop_index: u8, node_address: [u8; 32]) -> Self {
         Self {
             hop_index,
             node_address,
-            timestamp: timestamp_millis,
         }
     }
 
@@ -376,7 +374,6 @@ impl AckPayload {
         bytes.push(PacketType::Ack.to_byte());       // Type field
         bytes.push(self.hop_index);                   // Hop index
         bytes.extend_from_slice(&self.node_address);  // Node address
-        bytes.extend_from_slice(&self.timestamp.to_be_bytes()); // Timestamp
         bytes
     }
 
@@ -398,11 +395,11 @@ impl AckPayload {
             ));
         }
 
-        // Expected size: 1 (type) + 1 (hop) + 32 (address) + 8 (timestamp) = 42 bytes
-        if bytes.len() < 42 {
+        // Expected size: 1 (type) + 1 (hop) + 32 (address) = 34 bytes
+        if bytes.len() < 34 {
             return Err(Error::new(
                 ErrorKind::InvalidPayload,
-                format!("Ack payload too short: {} bytes, expected at least 42", bytes.len()),
+                format!("Ack payload too short: {} bytes, expected at least 34", bytes.len()),
             ));
         }
 
@@ -410,16 +407,10 @@ impl AckPayload {
         
         let mut node_address = [0u8; 32];
         node_address.copy_from_slice(&bytes[2..34]);
-        
-        let timestamp = u64::from_be_bytes([
-            bytes[34], bytes[35], bytes[36], bytes[37],
-            bytes[38], bytes[39], bytes[40], bytes[41],
-        ]);
 
         Ok(Self {
             hop_index,
             node_address,
-            timestamp,
         })
     }
 }
