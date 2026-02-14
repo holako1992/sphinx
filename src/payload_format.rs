@@ -39,21 +39,19 @@ impl PacketType {
 }
 
 /// Forward packet payload format:
-/// [1 byte: type=0x01][2 bytes: sender_tag_len][sender_tag][2 bytes: dest_len][dest][1 byte: has_surb][surb_len: 2][surb][data]
+/// [1 byte: type=0x01][2 bytes: sender_tag_len][sender_tag][1 byte: has_surb][surb_len: 2][surb][data]
 #[derive(Debug, Clone)]
 pub struct ForwardPayload {
     pub sender_tag: Vec<u8>,  // Random tag identifying the sender (not revealing identity)
-    pub destination: String,
     pub surb: Option<Vec<u8>>,  // Optional single SURB for reply
     pub data: Vec<u8>,
 }
 
 impl ForwardPayload {
     /// Create a new forward payload with an optional SURB
-    pub fn new(sender_tag: Vec<u8>, destination: String, surb: Option<Vec<u8>>, data: Vec<u8>) -> Self {
+    pub fn new(sender_tag: Vec<u8>, surb: Option<Vec<u8>>, data: Vec<u8>) -> Self {
         Self {
             sender_tag,
-            destination,
             surb,
             data,
         }
@@ -62,15 +60,11 @@ impl ForwardPayload {
     /// Serialize to bytes with strict format
     pub fn to_bytes(&self) -> Vec<u8> {
         let sender_tag_len = (self.sender_tag.len() as u16).to_be_bytes();
-        let dest_bytes = self.destination.as_bytes();
-        let dest_len = (dest_bytes.len() as u16).to_be_bytes();
 
         let mut bytes = Vec::new();
         bytes.push(PacketType::Forward.to_byte()); // Type field
         bytes.extend_from_slice(&sender_tag_len);  // Sender tag length
         bytes.extend_from_slice(&self.sender_tag); // Sender tag
-        bytes.extend_from_slice(&dest_len);        // Destination length
-        bytes.extend_from_slice(dest_bytes);       // Destination
         
         // Serialize optional SURB
         if let Some(surb) = &self.surb {
@@ -126,27 +120,6 @@ impl ForwardPayload {
         let sender_tag = bytes[offset..offset + sender_tag_len].to_vec();
         offset += sender_tag_len;
 
-        // Parse destination length
-        if bytes.len() < offset + 2 {
-            return Err(Error::new(
-                ErrorKind::InvalidPayload,
-                "Payload too short for destination length",
-            ));
-        }
-        let dest_len = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]) as usize;
-        offset += 2;
-
-        // Parse destination
-        if bytes.len() < offset + dest_len {
-            return Err(Error::new(
-                ErrorKind::InvalidPayload,
-                "Payload too short for destination",
-            ));
-        }
-        let destination = String::from_utf8(bytes[offset..offset + dest_len].to_vec())
-            .map_err(|e| Error::new(ErrorKind::InvalidPayload, format!("Invalid UTF-8 in destination: {}", e)))?;
-        offset += dest_len;
-
         // Parse optional SURB
         if bytes.len() < offset + 1 {
             return Err(Error::new(
@@ -192,7 +165,6 @@ impl ForwardPayload {
 
         Ok(Self {
             sender_tag,
-            destination,
             surb,
             data,
         })
@@ -419,7 +391,6 @@ mod tests {
     fn test_forward_payload_roundtrip_with_surb() {
         let original = ForwardPayload::new(
             vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
-            "example.com:80".to_string(),
             Some(vec![1, 2, 3, 4]),
             vec![5, 6, 7, 8, 9],
         );
@@ -427,7 +398,6 @@ mod tests {
         let bytes = original.to_bytes();
         let parsed = ForwardPayload::from_bytes(&bytes).unwrap();
 
-        assert_eq!(parsed.destination, original.destination);
         assert_eq!(parsed.surb, Some(vec![1, 2, 3, 4]));
         assert_eq!(parsed.data, original.data);
     }
@@ -436,7 +406,6 @@ mod tests {
     fn test_forward_payload_roundtrip_no_surb() {
         let original = ForwardPayload::new(
             vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
-            "example.com:80".to_string(),
             None,
             vec![10, 11, 12],
         );
@@ -444,7 +413,6 @@ mod tests {
         let bytes = original.to_bytes();
         let parsed = ForwardPayload::from_bytes(&bytes).unwrap();
 
-        assert_eq!(parsed.destination, original.destination);
         assert_eq!(parsed.surb, None);
         assert_eq!(parsed.data, original.data);
     }
@@ -463,7 +431,6 @@ mod tests {
     fn test_packet_type_detection() {
         let forward = ForwardPayload::new(
             vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
-            "test".to_string(),
             None,
             vec![],
         );
@@ -479,7 +446,6 @@ mod tests {
     fn test_wrong_type_parsing() {
         let forward = ForwardPayload::new(
             vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
-            "test".to_string(),
             None,
             vec![]);
         let bytes = forward.to_bytes();
