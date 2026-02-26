@@ -13,10 +13,6 @@ pub enum PacketType {
     Forward = 0x01,
     /// SURB reply packet returning to client
     Reply = 0x02,
-    /// Health check ping packet
-    Ping = 0x03,
-    /// Health check acknowledgment
-    Ack = 0x04,
 }
 
 impl PacketType {
@@ -24,8 +20,6 @@ impl PacketType {
         match byte {
             0x01 => Ok(PacketType::Forward),
             0x02 => Ok(PacketType::Reply),
-            0x03 => Ok(PacketType::Ping),
-            0x04 => Ok(PacketType::Ack),
             _ => Err(Error::new(
                 ErrorKind::InvalidPayload,
                 format!("Invalid packet type: 0x{:02x}", byte),
@@ -39,20 +33,32 @@ impl PacketType {
 }
 
 /// Forward packet payload format:
-/// [1 byte: type=0x01][2 bytes: sender_tag_len][sender_tag][1 byte: has_surb][surb_len: 2][surb][data]
+/// [1 byte: type=0x01][2 bytes: sender_tag_len][sender_tag][2 bytes: dest_len][dest][2 bytes: surb_count][surb1_len: 2][surb1]...[data]
 #[derive(Debug, Clone)]
 pub struct ForwardPayload {
     pub sender_tag: Vec<u8>,  // Random tag identifying the sender (not revealing identity)
-    pub surb: Option<Vec<u8>>,  // Optional single SURB for reply
+    pub destination: String,
+    pub surbs: Vec<Vec<u8>>,  // Multiple SURBs for potential reply fragments
     pub data: Vec<u8>,
 }
 
 impl ForwardPayload {
-    /// Create a new forward payload with an optional SURB
-    pub fn new(sender_tag: Vec<u8>, surb: Option<Vec<u8>>, data: Vec<u8>) -> Self {
+    /// Create a new forward payload with a single SURB
+    pub fn new(sender_tag: Vec<u8>, destination: String, surb_bytes: Vec<u8>, data: Vec<u8>) -> Self {
         Self {
             sender_tag,
-            surb,
+            destination,
+            surbs: vec![surb_bytes],
+            data,
+        }
+    }
+
+    /// Create a new forward payload with multiple SURBs
+    pub fn new_with_surbs(sender_tag: Vec<u8>, destination: String, surbs: Vec<Vec<u8>>, data: Vec<u8>) -> Self {
+        Self {
+            sender_tag,
+            destination,
+            surbs,
             data,
         }
     }
@@ -60,22 +66,25 @@ impl ForwardPayload {
     /// Serialize to bytes with strict format
     pub fn to_bytes(&self) -> Vec<u8> {
         let sender_tag_len = (self.sender_tag.len() as u16).to_be_bytes();
+        let dest_bytes = self.destination.as_bytes();
+        let dest_len = (dest_bytes.len() as u16).to_be_bytes();
+        let surb_count = (self.surbs.len() as u16).to_be_bytes();
 
         let mut bytes = Vec::new();
         bytes.push(PacketType::Forward.to_byte()); // Type field
         bytes.extend_from_slice(&sender_tag_len);  // Sender tag length
         bytes.extend_from_slice(&self.sender_tag); // Sender tag
-
-        // Serialize optional SURB
-        if let Some(surb) = &self.surb {
-            bytes.push(1); // Has SURB
+        bytes.extend_from_slice(&dest_len);        // Destination length
+        bytes.extend_from_slice(dest_bytes);       // Destination
+        bytes.extend_from_slice(&surb_count);      // Number of SURBs
+        
+        // Serialize each SURB with its length
+        for surb in &self.surbs {
             let surb_len = (surb.len() as u16).to_be_bytes();
             bytes.extend_from_slice(&surb_len);
             bytes.extend_from_slice(surb);
-        } else {
-            bytes.push(0); // No SURB
         }
-
+        
         bytes.extend_from_slice(&self.data);       // Data
         bytes
     }
@@ -120,17 +129,40 @@ impl ForwardPayload {
         let sender_tag = bytes[offset..offset + sender_tag_len].to_vec();
         offset += sender_tag_len;
 
-        // Parse optional SURB
-        if bytes.len() < offset + 1 {
+        // Parse destination length
+        if bytes.len() < offset + 2 {
             return Err(Error::new(
                 ErrorKind::InvalidPayload,
-                "Payload too short for SURB flag",
+                "Payload too short for destination length",
             ));
         }
-        let has_surb = bytes[offset];
-        offset += 1;
+        let dest_len = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]) as usize;
+        offset += 2;
 
-        let surb = if has_surb == 1 {
+        // Parse destination
+        if bytes.len() < offset + dest_len {
+            return Err(Error::new(
+                ErrorKind::InvalidPayload,
+                "Payload too short for destination",
+            ));
+        }
+        let destination = String::from_utf8(bytes[offset..offset + dest_len].to_vec())
+            .map_err(|e| Error::new(ErrorKind::InvalidPayload, format!("Invalid UTF-8 in destination: {}", e)))?;
+        offset += dest_len;
+
+        // Parse SURB count
+        if bytes.len() < offset + 2 {
+            return Err(Error::new(
+                ErrorKind::InvalidPayload,
+                "Payload too short for SURB count",
+            ));
+        }
+        let surb_count = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]) as usize;
+        offset += 2;
+
+        // Parse each SURB
+        let mut surbs = Vec::new();
+        for _ in 0..surb_count {
             // Parse SURB length
             if bytes.len() < offset + 2 {
                 return Err(Error::new(
@@ -150,22 +182,16 @@ impl ForwardPayload {
             }
             let surb_bytes = bytes[offset..offset + surb_len].to_vec();
             offset += surb_len;
-            Some(surb_bytes)
-        } else if has_surb == 0 {
-            None
-        } else {
-            return Err(Error::new(
-                ErrorKind::InvalidPayload,
-                format!("Invalid SURB flag: {}", has_surb),
-            ));
-        };
+            surbs.push(surb_bytes);
+        }
 
         // Remaining bytes are data
         let data = bytes[offset..].to_vec();
 
         Ok(Self {
             sender_tag,
-            surb,
+            destination,
+            surbs,
             data,
         })
     }
@@ -217,203 +243,43 @@ impl ReplyPayload {
     }
 }
 
-/// Ping packet payload format (health check):
-/// [1 byte: type=0x03][1 byte: hop_index][2 bytes: surb_count][surb1_len: 2][surb1]...
-#[derive(Debug, Clone)]
-pub struct PingPayload {
-    pub hop_index: u8,        // Current hop index (0 for first hop)
-    pub surbs: Vec<Vec<u8>>,  // SURBs for each hop to send ACK back
-}
-
-impl PingPayload {
-    /// Create a new ping payload
-    pub fn new(hop_index: u8, surbs: Vec<Vec<u8>>) -> Self {
-        Self { hop_index, surbs }
-    }
-
-    /// Serialize to bytes with strict format
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let surb_count = (self.surbs.len() as u16).to_be_bytes();
-
-        let mut bytes = Vec::new();
-        bytes.push(PacketType::Ping.to_byte()); // Type field
-        bytes.push(self.hop_index);              // Hop index
-        bytes.extend_from_slice(&surb_count);    // Number of SURBs
-
-        // Serialize each SURB with its length
-        for surb in &self.surbs {
-            let surb_len = (surb.len() as u16).to_be_bytes();
-            bytes.extend_from_slice(&surb_len);
-            bytes.extend_from_slice(surb);
-        }
-
-        bytes
-    }
-
-    /// Parse from bytes with strict format validation
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        if bytes.is_empty() {
-            return Err(Error::new(
-                ErrorKind::InvalidPayload,
-                "Empty payload",
-            ));
-        }
-
-        // Check packet type
-        let packet_type = PacketType::from_byte(bytes[0])?;
-        if packet_type != PacketType::Ping {
-            return Err(Error::new(
-                ErrorKind::InvalidPayload,
-                format!("Expected Ping packet type, got {:?}", packet_type),
-            ));
-        }
-
-        let mut offset = 1;
-
-        // Parse hop index
-        if bytes.len() < offset + 1 {
-            return Err(Error::new(
-                ErrorKind::InvalidPayload,
-                "Payload too short for hop index",
-            ));
-        }
-        let hop_index = bytes[offset];
-        offset += 1;
-
-        // Parse SURB count
-        if bytes.len() < offset + 2 {
-            return Err(Error::new(
-                ErrorKind::InvalidPayload,
-                "Payload too short for SURB count",
-            ));
-        }
-        let surb_count = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]) as usize;
-        offset += 2;
-
-        // Parse each SURB
-        let mut surbs = Vec::new();
-        for _ in 0..surb_count {
-            // Parse SURB length
-            if bytes.len() < offset + 2 {
-                return Err(Error::new(
-                    ErrorKind::InvalidPayload,
-                    "Payload too short for SURB length",
-                ));
-            }
-            let surb_len = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]) as usize;
-            offset += 2;
-
-            // Parse SURB
-            if bytes.len() < offset + surb_len {
-                return Err(Error::new(
-                    ErrorKind::InvalidPayload,
-                    "Payload too short for SURB",
-                ));
-            }
-            let surb_bytes = bytes[offset..offset + surb_len].to_vec();
-            offset += surb_len;
-            surbs.push(surb_bytes);
-        }
-
-        Ok(Self { hop_index, surbs })
-    }
-}
-
-/// Ack packet payload format (health check response):
-/// [1 byte: type=0x04][1 byte: hop_index][32 bytes: node_address]
-#[derive(Debug, Clone)]
-pub struct AckPayload {
-    pub hop_index: u8,            // Which hop this ACK is from
-    pub node_address: [u8; 32],   // Sphinx address of the responding node
-}
-
-impl AckPayload {
-    /// Create a new ACK payload
-    pub fn new(hop_index: u8, node_address: [u8; 32]) -> Self {
-        Self {
-            hop_index,
-            node_address,
-        }
-    }
-
-    /// Serialize to bytes with strict format
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.push(PacketType::Ack.to_byte());       // Type field
-        bytes.push(self.hop_index);                   // Hop index
-        bytes.extend_from_slice(&self.node_address);  // Node address
-        bytes
-    }
-
-    /// Parse from bytes with strict format validation
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        if bytes.is_empty() {
-            return Err(Error::new(
-                ErrorKind::InvalidPayload,
-                "Empty payload",
-            ));
-        }
-
-        // Check packet type
-        let packet_type = PacketType::from_byte(bytes[0])?;
-        if packet_type != PacketType::Ack {
-            return Err(Error::new(
-                ErrorKind::InvalidPayload,
-                format!("Expected Ack packet type, got {:?}", packet_type),
-            ));
-        }
-
-        // Expected size: 1 (type) + 1 (hop) + 32 (address) = 34 bytes
-        if bytes.len() < 34 {
-            return Err(Error::new(
-                ErrorKind::InvalidPayload,
-                format!("Ack payload too short: {} bytes, expected at least 34", bytes.len()),
-            ));
-        }
-
-        let hop_index = bytes[1];
-
-        let mut node_address = [0u8; 32];
-        node_address.copy_from_slice(&bytes[2..34]);
-
-        Ok(Self {
-            hop_index,
-            node_address,
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_forward_payload_roundtrip_with_surb() {
+    fn test_forward_payload_roundtrip() {
         let original = ForwardPayload::new(
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
-            Some(vec![1, 2, 3, 4]),
+            "example.com:80".to_string(),
+            vec![1, 2, 3, 4],
             vec![5, 6, 7, 8, 9],
         );
 
         let bytes = original.to_bytes();
         let parsed = ForwardPayload::from_bytes(&bytes).unwrap();
 
-        assert_eq!(parsed.surb, Some(vec![1, 2, 3, 4]));
+        assert_eq!(parsed.destination, original.destination);
+        assert_eq!(parsed.surbs.len(), 1);
+        assert_eq!(parsed.surbs[0], vec![1, 2, 3, 4]);
         assert_eq!(parsed.data, original.data);
     }
 
     #[test]
-    fn test_forward_payload_roundtrip_no_surb() {
-        let original = ForwardPayload::new(
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
-            None,
+    fn test_forward_payload_multiple_surbs() {
+        let original = ForwardPayload::new_with_surbs(
+            "example.com:80".to_string(),
+            vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8, 9]],
             vec![10, 11, 12],
         );
 
         let bytes = original.to_bytes();
         let parsed = ForwardPayload::from_bytes(&bytes).unwrap();
 
-        assert_eq!(parsed.surb, None);
+        assert_eq!(parsed.destination, original.destination);
+        assert_eq!(parsed.surbs.len(), 3);
+        assert_eq!(parsed.surbs[0], vec![1, 2, 3]);
+        assert_eq!(parsed.surbs[1], vec![4, 5, 6]);
+        assert_eq!(parsed.surbs[2], vec![7, 8, 9]);
         assert_eq!(parsed.data, original.data);
     }
 
@@ -430,8 +296,8 @@ mod tests {
     #[test]
     fn test_packet_type_detection() {
         let forward = ForwardPayload::new(
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
-            None,
+            "test".to_string(),
+            vec![],
             vec![],
         );
         let forward_bytes = forward.to_bytes();
@@ -444,10 +310,7 @@ mod tests {
 
     #[test]
     fn test_wrong_type_parsing() {
-        let forward = ForwardPayload::new(
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
-            None,
-            vec![]);
+        let forward = ForwardPayload::new("test".to_string(), vec![], vec![]);
         let bytes = forward.to_bytes();
         
         // Try to parse as reply - should fail
