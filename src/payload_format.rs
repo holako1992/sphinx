@@ -17,6 +17,8 @@ pub enum PacketType {
     Ping = 0x03,
     /// Health check acknowledgment
     Ack = 0x04,
+    /// Encrypted client registration at entry node
+    Register = 0x05,
 }
 
 impl PacketType {
@@ -26,6 +28,7 @@ impl PacketType {
             0x02 => Ok(PacketType::Reply),
             0x03 => Ok(PacketType::Ping),
             0x04 => Ok(PacketType::Ack),
+            0x05 => Ok(PacketType::Register),
             _ => Err(Error::new(
                 ErrorKind::InvalidPayload,
                 format!("Invalid packet type: 0x{:02x}", byte),
@@ -380,6 +383,53 @@ impl AckPayload {
             hop_index,
             node_address,
         })
+    }
+}
+
+/// Register packet payload format (encrypted client registration at entry node):
+/// [1 byte: type=0x05][32 bytes: client_address]
+///
+/// Fixed-size: always 33 bytes plaintext. The entry node decrypts this FinalHop
+/// packet and maps the client_address to the live TCP write socket.
+#[derive(Debug, Clone)]
+pub struct RegisterPayload {
+    pub client_address: [u8; 32],
+}
+
+impl RegisterPayload {
+    pub fn new(client_address: [u8; 32]) -> Self {
+        Self { client_address }
+    }
+
+    /// Serialize to bytes: [type=0x05][32 bytes address]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(33);
+        bytes.push(PacketType::Register.to_byte());
+        bytes.extend_from_slice(&self.client_address);
+        bytes
+    }
+
+    /// Parse from bytes with strict format validation
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() < 33 {
+            return Err(Error::new(
+                ErrorKind::InvalidPayload,
+                format!("Register payload too short: {} bytes, expected 33", bytes.len()),
+            ));
+        }
+
+        let packet_type = PacketType::from_byte(bytes[0])?;
+        if packet_type != PacketType::Register {
+            return Err(Error::new(
+                ErrorKind::InvalidPayload,
+                format!("Expected Register packet type, got {:?}", packet_type),
+            ));
+        }
+
+        let mut client_address = [0u8; 32];
+        client_address.copy_from_slice(&bytes[1..33]);
+
+        Ok(Self { client_address })
     }
 }
 
